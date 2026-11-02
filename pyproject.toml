@@ -1,10 +1,9 @@
 [project]
 name = "askthecow"
 version = "0.1.0"
-description = "Chat bot that answers electrical engineers' questions about an embedded firmware repository (master branch only)."
+description = "Chat bot that answers electrical engineers' questions about an embedded firmware repository (master branch only), with Claude Code (claude -p) as the agent."
 requires-python = ">=3.10"
 dependencies = [
-    "anthropic>=2.3,<3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
 ]

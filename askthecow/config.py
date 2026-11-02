@@ -1,26 +1,11 @@
-"""Settings. All values come from environment variables (prefix ASKTHECOW_)."""
+"""Settings. Every field can be set with an environment variable: ASKTHECOW_<FIELD NAME IN CAPITALS>."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-
-
-def _env(name: str, default: str | None = None) -> str | None:
-    return os.environ.get(f"ASKTHECOW_{name}", default)
-
-
-def _int(name: str, default: int) -> int:
-    value = _env(name)
-    return int(value) if value not in (None, "") else default
-
-
-def _bool(name: str, default: bool) -> bool:
-    value = _env(name)
-    if value in (None, ""):
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -33,23 +18,27 @@ class Settings:
     # Storage
     data_dir: Path = Path("data")
 
-    # Models. Effort controls thinking depth and token spend.
+    # Claude Code CLI. Every agent run is one `claude -p` process.
+    claude_bin: str = "claude"
     model: str = "claude-opus-5-5"
     answer_effort: str = "high"
     calibration_model: str = "claude-opus-5-5"
     digest_effort: str = "medium"
     brief_effort: str = "high"
-    use_fallbacks: bool = True
-
-    # Agent limits
-    max_agent_turns: int = 40
-    max_answer_tokens: int = 32000
+    fallback_model: str = ""  # optional `--fallback-model`, used when the main model is overloaded
+    answer_timeout_seconds: int = 900
+    brief_timeout_seconds: int = 3600
+    digest_timeout_seconds: int = 900
+    answer_max_budget_usd: float = 0.0  # 0 means no limit
+    max_concurrent_agents: int = 3
 
     # Calibration
     digest_chunk_chars: int = 120_000
     max_diff_chars_per_commit: int = 8_000
     digest_concurrency: int = 4
     brief_max_chars: int = 60_000
+    history_max_chars: int = 400_000
+    full_rebrief_every: int = 25
 
     # Sync with the remote
     poll_interval_seconds: int = 300
@@ -57,11 +46,15 @@ class Settings:
     auto_calibrate: bool = True
     webhook_secret: str = ""
 
+    # Extra input channels started with the server, as "module:ClassName", comma separated.
+    channels: list[str] = field(default_factory=list)
+
     # HTTP
     host: str = "127.0.0.1"
     port: int = 8000
-    password: str = ""  # When set, HTTP Basic auth is required (any user name).
-    admin_token: str = ""  # When set, admin endpoints need header X-Admin-Token.
+    password: str = ""  # When set, HTTP Basic auth is required. The user name becomes the chat owner.
+    admin_token: str = ""  # When set, admin endpoints are on and need header X-Admin-Token.
+    api_token: str = ""  # When set, POST /api/ask is on and needs header X-Api-Token.
 
     @property
     def db_path(self) -> Path:
@@ -75,32 +68,30 @@ class Settings:
     def worktrees_path(self) -> Path:
         return self.data_dir / "worktrees"
 
+    @property
+    def knowledge_path(self) -> Path:
+        """Plain files the agents can read: brief.md, history.md, commit-notes.txt."""
+        return self.data_dir / "knowledge"
+
     @classmethod
-    def from_env(cls) -> "Settings":
-        d = cls()
-        return cls(
-            repo_url=_env("REPO_URL", d.repo_url) or "",
-            branch=_env("BRANCH", d.branch) or "master",
-            project_name=_env("PROJECT_NAME", d.project_name) or d.project_name,
-            data_dir=Path(_env("DATA_DIR", str(d.data_dir)) or "data"),
-            model=_env("MODEL", d.model) or d.model,
-            answer_effort=_env("ANSWER_EFFORT", d.answer_effort) or d.answer_effort,
-            calibration_model=_env("CALIBRATION_MODEL", d.calibration_model) or d.calibration_model,
-            digest_effort=_env("DIGEST_EFFORT", d.digest_effort) or d.digest_effort,
-            brief_effort=_env("BRIEF_EFFORT", d.brief_effort) or d.brief_effort,
-            use_fallbacks=_bool("USE_FALLBACKS", d.use_fallbacks),
-            max_agent_turns=_int("MAX_AGENT_TURNS", d.max_agent_turns),
-            max_answer_tokens=_int("MAX_ANSWER_TOKENS", d.max_answer_tokens),
-            digest_chunk_chars=_int("DIGEST_CHUNK_CHARS", d.digest_chunk_chars),
-            max_diff_chars_per_commit=_int("MAX_DIFF_CHARS_PER_COMMIT", d.max_diff_chars_per_commit),
-            digest_concurrency=_int("DIGEST_CONCURRENCY", d.digest_concurrency),
-            brief_max_chars=_int("BRIEF_MAX_CHARS", d.brief_max_chars),
-            poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", d.poll_interval_seconds),
-            fetch_min_interval_seconds=_int("FETCH_MIN_INTERVAL_SECONDS", d.fetch_min_interval_seconds),
-            auto_calibrate=_bool("AUTO_CALIBRATE", d.auto_calibrate),
-            webhook_secret=_env("WEBHOOK_SECRET", "") or "",
-            host=_env("HOST", d.host) or d.host,
-            port=_int("PORT", d.port),
-            password=_env("PASSWORD", "") or "",
-            admin_token=_env("ADMIN_TOKEN", "") or "",
-        )
+    def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
+        env = os.environ if environ is None else environ
+        values = {}
+        for f in dataclasses.fields(cls):
+            raw = env.get(f"ASKTHECOW_{f.name.upper()}")
+            if raw is None or raw == "":
+                continue
+            default = cls.__dataclass_fields__[f.name].default
+            if f.name == "channels":
+                values[f.name] = [c.strip() for c in raw.split(",") if c.strip()]
+            elif isinstance(default, bool):
+                values[f.name] = raw.strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(default, int):
+                values[f.name] = int(raw)
+            elif isinstance(default, float):
+                values[f.name] = float(raw)
+            elif isinstance(default, Path):
+                values[f.name] = Path(raw)
+            else:
+                values[f.name] = raw
+        return cls(**values)

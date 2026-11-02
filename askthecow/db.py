@@ -1,9 +1,8 @@
-"""SQLite storage: chats, messages, knowledge base (commit notes, digests, briefs) and state."""
+"""SQLite storage: conversations, messages, knowledge base (commit notes, digests, briefs) and state."""
 
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -12,14 +11,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA = """
+-- A conversation. channel is where it comes from ('web', 'cli', 'email', ...).
+-- external_id is the channel's own key for it (for example an email thread id).
 CREATE TABLE IF NOT EXISTS chats (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT 'New chat',
+    channel TEXT NOT NULL DEFAULT 'web',
+    external_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chats_owner ON chats(owner, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS chats_external ON chats(channel, external_id) WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,6 +39,7 @@ CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
 -- One row per master commit that the calibration has read.
 CREATE TABLE IF NOT EXISTS commit_notes (
     sha TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL DEFAULT 0, -- position in the branch history (git rev-list --reverse)
     author TEXT NOT NULL,
     date TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -71,13 +76,6 @@ CREATE TABLE IF NOT EXISTS state (
 );
 """
 
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS commit_notes_fts USING fts5(
-    sha UNINDEXED, subject, note, files, topics, tokenize = 'porter unicode61'
-);
-"""
-
-
 class Database:
     def __init__(self, path: Path | str):
         self.path = str(path)
@@ -90,11 +88,6 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
-            try:
-                self._conn.executescript(FTS_SCHEMA)
-                self.has_fts = True
-            except sqlite3.OperationalError:
-                self.has_fts = False
 
     # ------------------------------------------------------------------ helpers
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -127,17 +120,23 @@ class Database:
         )
 
     # -------------------------------------------------------------------- chats
-    def create_chat(self, owner: str, title: str = "New chat") -> dict:
+    def create_chat(
+        self, owner: str, title: str = "New chat", channel: str = "web", external_id: str | None = None
+    ) -> dict:
         now = time.time()
         chat_id = uuid.uuid4().hex
         self._exec(
-            "INSERT INTO chats(id, owner, title, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
-            (chat_id, owner, title, now, now),
+            "INSERT INTO chats(id, owner, title, channel, external_id, created_at, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, owner, title, channel, external_id, now, now),
         )
         return self.get_chat(chat_id)  # type: ignore[return-value]
 
     def get_chat(self, chat_id: str) -> dict | None:
         return self._one("SELECT * FROM chats WHERE id = ?", (chat_id,))
+
+    def find_chat(self, channel: str, external_id: str) -> dict | None:
+        return self._one("SELECT * FROM chats WHERE channel = ? AND external_id = ?", (channel, external_id))
 
     def list_chats(self, owner: str | None = None, limit: int = 200) -> list[dict]:
         if owner is None:
@@ -209,16 +208,11 @@ class Database:
                 digest_id = cur.lastrowid
                 for n in notes:
                     self._conn.execute(
-                        "INSERT OR REPLACE INTO commit_notes(sha, author, date, subject, note, files, topics, digest_id)"
-                        " VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                        (n["sha"], n["author"], n["date"], n["subject"], n["note"], n["files"], n["topics"], digest_id),
+                        "INSERT OR REPLACE INTO commit_notes(sha, seq, author, date, subject, note, files, topics, digest_id)"
+                        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (n["sha"], n.get("seq", 0), n["author"], n["date"], n["subject"], n["note"], n["files"],
+                         n["topics"], digest_id),
                     )
-                    if self.has_fts:
-                        self._conn.execute("DELETE FROM commit_notes_fts WHERE sha = ?", (n["sha"],))
-                        self._conn.execute(
-                            "INSERT INTO commit_notes_fts(sha, subject, note, files, topics) VALUES(?, ?, ?, ?, ?)",
-                            (n["sha"], n["subject"], n["note"], n["files"], n["topics"]),
-                        )
                 self._conn.execute("COMMIT")
             except BaseException:
                 self._conn.execute("ROLLBACK")
@@ -232,30 +226,8 @@ class Database:
         row = self._one("SELECT MAX(id) AS m FROM digests")
         return int(row["m"] or 0) if row else 0
 
-    def search_commit_notes(self, query: str, limit: int = 15) -> list[dict]:
-        words = re.findall(r"[A-Za-z0-9_]+", query)
-        if not words:
-            return []
-        if self.has_fts:
-            fts_query = " OR ".join(f'"{w}"' for w in words[:12])
-            try:
-                return self._all(
-                    "SELECT n.sha, n.date, n.author, n.subject, n.note, n.files, n.topics "
-                    "FROM commit_notes_fts f JOIN commit_notes n ON n.sha = f.sha "
-                    "WHERE commit_notes_fts MATCH ? ORDER BY bm25(commit_notes_fts) LIMIT ?",
-                    (fts_query, limit),
-                )
-            except sqlite3.OperationalError:
-                pass
-        clauses = " OR ".join(["(subject LIKE ? OR note LIKE ? OR files LIKE ? OR topics LIKE ?)"] * len(words))
-        params: list[Any] = []
-        for w in words:
-            params += [f"%{w}%"] * 4
-        return self._all(
-            f"SELECT sha, date, author, subject, note, files, topics FROM commit_notes WHERE {clauses} "
-            "ORDER BY date DESC LIMIT ?",
-            (*params, limit),
-        )
+    def list_commit_notes(self) -> list[dict]:
+        return self._all("SELECT * FROM commit_notes ORDER BY seq, date")
 
     def save_brief(self, commit_sha: str, kind: str, content: str) -> int:
         cur = self._exec(
