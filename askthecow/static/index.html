@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AskTheCow</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="logo">AskTheCow</span>
+      <button id="new-chat" title="New chat">+ New</button>
+    </div>
+    <ul id="chat-list"></ul>
+    <div class="side-foot">
+      <div id="who"></div>
+      <button id="show-brief" class="link">Repository brief</button>
+    </div>
+  </aside>
+
+  <main>
+    <header id="statusbar">
+      <button id="toggle-side" class="link" aria-label="Chats">&#9776;</button>
+      <span id="status-text">Loading...</span>
+    </header>
+    <section id="messages">
+      <div class="empty">
+        <h2>Ask about the firmware</h2>
+        <p>Questions are answered from the latest code on the tracked branch. Examples:</p>
+        <ul>
+          <li>Which pin drives the fan PWM and what is its frequency?</li>
+          <li>What is the over-current trip threshold and how fast does it react?</li>
+          <li>When did the ADC sample rate change, and why?</li>
+        </ul>
+      </div>
+    </section>
+    <form id="composer">
+      <textarea id="input" rows="2" placeholder="Ask a question (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+
+  <dialog id="brief-dialog">
+    <div class="dialog-head"><strong>Repository brief</strong><button id="close-brief" class="link">Close</button></div>
+    <div id="brief-body" class="md"></div>
+  </dialog>
+
+  <dialog id="name-dialog">
+    <form method="dialog" id="name-form">
+      <p>Your name (your chats are saved under it):</p>
+      <input id="name-input" required maxlength="100" autocomplete="name">
+      <button type="submit">Continue</button>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
